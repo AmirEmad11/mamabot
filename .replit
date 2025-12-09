@@ -1,0 +1,47 @@
+modules = ["python-3.11"]
+
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+packages = ["openssl"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot"
+
+[[workflows.workflow]]
+name = "Telegram Bot"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python bot.py"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["python", "bot.py"]
+
+[env]
+TELEGRAM_API_ID = "21943267"
+TELEGRAM_API_HASH = "d120be656f0dbe54a4ed369e70c2319b"
+TELEGRAM_PHONE = "+201014367365"
+TELEGRAM_BOT_TOKEN = "8490075730:AAEFxCtWP8TJRLhTx4oXWD8TmC_XRejlkIk"
+TELEGRAM_CHANNEL = "1672479948"
+
+[userenv]
+
+[userenv.shared]
+TELEGRAM_CHANNEL = "1Xbet | APPLE OF FORTUNE"
