@@ -1,0 +1,513 @@
+# bot.py - نظام الفيديوهات الذكي
+# التحديث: كل 3 إشارات → فيديو واحد مطابق للنمط
+
+try:
+    import telethonpatch
+except Exception:
+    pass
+
+import os
+import json
+import asyncio
+import logging
+import random
+import time
+import tempfile
+import requests
+from io import BytesIO
+from datetime import datetime
+import pytz
+from typing import List, Optional, Dict, Union, Any
+from telethon import TelegramClient, events, Button
+from telethon.errors import FloodWaitError
+from telethon.tl.functions.messages import HideAllChatJoinRequestsRequest
+from telethon.tl.types import UpdatePendingJoinRequests
+
+# ---------------- logging ----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("bot")
+
+# ---------------- قراءة الإعدادات من البيئة ----------------
+try:
+    from config import API_ID, API_HASH, PHONE, PASSWORD, BOT_TOKEN, CHANNEL_IDENTIFIER, ADMIN_ID
+except ImportError:
+    API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
+    API_HASH = os.getenv("TELEGRAM_API_HASH", "")
+    PHONE = os.getenv("TELEGRAM_PHONE", "")
+    PASSWORD = os.getenv("TELEGRAM_PASSWORD", "")
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    CHANNEL_IDENTIFIER = os.getenv("TELEGRAM_CHANNEL", "")
+    ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0")) if os.getenv("TELEGRAM_ADMIN_ID") else 0
+
+TIMEZONE = pytz.timezone('Africa/Cairo')
+
+if not API_ID or not API_HASH:
+    log.critical("Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in environment.")
+    raise SystemExit("Set TELEGRAM_API_ID and TELEGRAM_API_HASH first.")
+
+if not PHONE:
+    log.critical("Missing TELEGRAM_PHONE in environment.")
+    raise SystemExit("Set TELEGRAM_PHONE first.")
+
+# ---------------- resources & state ----------------
+APPLE_GAME_PHOTOS = ["apple1.jpg", "apple2.jpg", "apple3.jpg"]
+PLAN_ONE_IMAGES = ["https://i.ibb.co/rfZ91BK2/6.jpg", "https://i.ibb.co/Ng2CHCgm/7.jpg"]
+PLAN_TWO_IMAGES = ["https://i.ibb.co/whfSdLCX/8.jpg", "https://i.ibb.co/wFgCkrxp/9.jpg"]
+PLAN_THREE_IMAGE = "https://i.ibb.co/hxDKTCwY/10.jpg"
+
+# ============ إعدادات نظام الفيديوهات الجديد ============
+VIDEOS_DIR = "videos"
+VIDEO_EVERY_N_SIGNALS = 3  # فيديو كل 3 إشارات
+VIDEO_CAPTION = """🎯 شوف النتيجة الفعلية للإشارة!
+
+✅ تم الفوز باستخدام الإشارة
+💰 الربح مضمون مع الإشارات الصحيحة
+
+⚠️ تذكر: استخدم الكود BB33 عند التسجيل
+🔗 رابط التسجيل: https://redirspinner.com/2CFD?p=%2Fregistration%2F
+💬 للتواصل: @elharam110"""
+
+# ربط الأنماط بالفيديوهات
+PATTERN_TO_VIDEO = {
+    # صف واحد
+    "9:0": "proof_row9_col0.mp4",
+    "9:1": "proof_row9_col1.mp4",
+    "9:2": "proof_row9_col2.mp4",
+    "9:3": "proof_row9_col3.mp4",
+    "9:4": "proof_row9_col4.mp4",
+    
+    # صفين
+    "9:0_8:0": "proof_row9_0_row8_0.mp4",
+    "9:0_8:2": "proof_row9_0_row8_2.mp4",
+    "9:1_8:3": "proof_row9_1_row8_3.mp4",
+    "9:2_8:2": "proof_row9_2_row8_2.mp4",
+    "9:4_8:4": "proof_row9_4_row8_4.mp4",
+    "9:0_8:4": "proof_row9_0_row8_4.mp4",
+    "9:4_8:0": "proof_row9_4_row8_0.mp4",
+    
+    # ثلاث صفوف
+    "9:0_8:1_7:2": "proof_row9_0_row8_1_row7_2.mp4",
+    "9:2_8:2_7:2": "proof_row9_2_row8_2_row7_2.mp4",
+    "9:0_8:2_7:4": "proof_row9_0_row8_2_row7_4.mp4",
+    "9:4_8:2_7:0": "proof_row9_4_row8_2_row7_0.mp4",
+    "9:1_8:1_7:1": "proof_row9_1_row8_1_row7_1.mp4",
+    
+    # أربع صفوف
+    "9:0_8:1_7:2_6:3": "proof_row9_0_row8_1_row7_2_row6_3.mp4",
+    "9:3_8:2_7:1_6:0": "proof_row9_3_row8_2_row7_1_row6_0.mp4",
+    "9:2_8:2_7:2_6:2": "proof_row9_2_row8_2_row7_2_row6_2.mp4",
+    "9:0_8:4_7:0_6:4": "proof_row9_0_row8_4_row7_0_row6_4.mp4",
+    "9:1_8:3_7:1_6:3": "proof_row9_1_row8_3_row7_1_row6_3.mp4",
+}
+
+# الأنماط المتاحة
+ALL_PATTERNS = [
+    {9: 0}, {9: 1}, {9: 2}, {9: 3}, {9: 4},
+    {9: 0, 8: 0}, {9: 0, 8: 2}, {9: 1, 8: 3}, {9: 2, 8: 2}, {9: 4, 8: 4}, {9: 0, 8: 4}, {9: 4, 8: 0},
+    {9: 0, 8: 1, 7: 2}, {9: 2, 8: 2, 7: 2}, {9: 0, 8: 2, 7: 4}, {9: 4, 8: 2, 7: 0}, {9: 1, 8: 1, 7: 1},
+    {9: 0, 8: 1, 7: 2, 6: 3}, {9: 3, 8: 2, 7: 1, 6: 0}, {9: 2, 8: 2, 7: 2, 6: 2}, 
+    {9: 0, 8: 4, 7: 0, 6: 4}, {9: 1, 8: 3, 7: 1, 6: 3}
+]
+
+STATE_FILE = "state.json"
+DELAY_BETWEEN_MESSAGES = 3
+last_apple_patterns = []
+last_used_patterns = []  # جديد: تتبع الأنماط المستخدمة
+video_counter = 0  # جديد: عداد الإشارات
+last_apple_info = None  # جديد: معلومات آخر إشارة
+
+# روابط الأزرار التفاعلية
+REGISTRATION_LINK = "https://redirspinner.com/2CFD?p=%2Fregistration%2F"
+CONTACT_USERNAME = "@elharam110"
+TUTORIAL_LINK = "https://t.me/c/3296506024/4287"
+
+# ---------------- الرسائل ----------------
+WELCOME_MSG = "السلام عليكم 👋\nجاهز تبدأ تشتغل معانا وتعمل فلوس؟ 💰"
+SECOND_MSG = (
+    "كل يوم بنزل إشارات للعبة 🍎Apple Of Fortune🍎 اللي بتساعد الناس يكسبوا بشكل "
+    "ثابت أكتر من 5000 جنيه في اليوم. الموضوع بسيط جدًا: أنا بقولك تراهن فين، "
+    "إنت بتكرر، وإنت بتكسب."
+)
+THIRD_MSG = """بص على نتايج عملائي 👆
+الناس دي عمرها ما سمعت عن لعبة 🍎Apple Of Fortune🍎 قبل كده وماكانوش يعرفوا إن ممكن يكسبوا منها.
+دلوقتي، بفضل إشاراتي، بيكسبوا 5000 جنيه في اليوم 💸
+"""
+FOURTH_MSG = """القواعد سهلة ✅
+
+في الأول لازم تسجّل في Spinbetter بحساب جديد بالبرومو كود او الرمز الترويجي الخاص بينا:   BB33
+ملحوظه : البرنامج يشبه 1Xbet بنسبه 100%
+
+رابط التسجيل : 🔥🔥 https://redirspinner.com/2CFD?p=%2Fregistration%2F
+
+رابط تحميل التطبيق : https://spin-b.com/mwGY27?tag=d_198425m_625309c_cz_Rp1izZ7MNLjqkWLbUKTekx
+
+بعدها بتحط إيداع 195 جنيه او اكتر، وبعدها بتستعمل إشاراتي الـ VIP عشان تكسب!
+
+🚀 تابع قناتي وشوف بنفسك! 👇
+https://t.me/+0rHjbBJAvV0xMmVk
+
+نصيبي هو 10% من أرباحك في الشهر!
+خلينا نكون صريحين مع بعض 🤝😉
+
+اول ما تعمل ارباح صورهالي و ابعتها هنا نشارك بيها الناس مع بعض ❤️
+كلمني علي : @elharam110
+"""
+PLAN_ONE_TEXT = """
+✨ مش بس فخور باللي بعمله… كمان سعيد إني بشوف حياة ناس كتير بتتغير بفضل مجهودي 💸
+أهم حاجة عندي أشوفك مطمّن، واثق، وعايش أحسن.
+
+فريقي حلّل ألعاب زي التفاحه و الطياره وPenalty.
+ومن هنا طلع برنامج قوي بيتوقع بدقة عالية 💻
+
+مش بوعدك تعمل ملايين بين يوم وليلة يا أخويا… لكن لو اتبعت خطوتي، ممكن تكسب بسهولة من ٨٠٠٠ لـ١٠٠٠٠ جنيه يوميًا 🤗
+
+والأحلى: بـ٢٥٠ جنيه بس، ممكن تحولهم لأكتر من ٨٠٠٠ جنيه في ساعتين 🤑
+
+🚀 الفرصة دي مش هترجع… خد خطوة النهاردة وانضم لفريقي.
+
+للتواصل : ⬇️⬇️
+👉 @elharam110
+👉 @elharam110
+👉 @elharam110
+"""
+PLAN_TWO_TEXT = """
+💎 كل يوم بيوصلني رسائل من ناس حياتهم بدأت تتغير بفضل البوت:
+
+💬 "يا أخويا، امبارح سحبت ٨٠٠٠ جنيه من غير أي مجهود. حاجة خيالية!"
+💬 "عمري ما كنت أتخيل يكون عندي دخل زيادة كده، دلوقتي بقى عادة كل أسبوع."
+💬 "بفضل البوت ما بقيتش معتمد على مرتبي بس، ده مستوى تاني خالص!"
+
+⚡️ ناس عادية زيك بالظبط، لكن عندهم الجرأة ياخدوا خطوة.
+
+❓ عايز قصتك تكون الجاية اللي ننشرها في القناة؟
+
+📩 ابعتلي دلوقتي: @elharam110
+"""
+PLAN_THREE_TEXT = """
+🔥 مش ببيع كورسات ومش بوعِد بمعجزات.
+
+أنا بس بشارك الحاجة اللي فعلاً غيّرت حياتي.
+📈 بالبرنامج ده بدأت أكسب بشكل عمري ما كنت متخيّله.
+
+⏳ هتجرّب وتدي لنفسك فرصة؟ ولا هتفضل تتفرّج والناس حواليك بتكسب؟
+
+اكتبلي دلوقتي: 👉💎 @elharam110
+"""
+GAME_INTRO_TEXT = "🚨🚨 انتظر إشارة جديدة..."
+GAME_CONGRATS_TEXT = "🎉 مبروك لكل من شارك وفاز معنا! انتظرونا في الإشارة القادمة..."
+FINAL_SUPPORT_MSG = "لو عندك مشكلة او استفسارات تواصل مع : @elharam110"
+
+# رسائل FOMO والمتابعة
+FOMO_30MIN_MSG = """⏰ تنبيه مهم!
+
+لاحظت إنك شفت الرسائل لكن لم تسجل بعد.
+
+⚠️ معلومة: الكود الترويجي BB33 متاح لأول 50 شخص فقط كل يوم
+📊 اليوم سجل 37 شخص... باقي 13 مكان فقط!
+
+كل دقيقة تتأخر فيها = خسارة فرصة ربح محتملة 💸"""
+
+FOMO_3HOURS_MSG = """🚨 تحذير!
+
+أنت في طريقك لخسارة فرصة العمر...
+
+💰 لو كنت سجلت من 3 ساعات، كنت الآن ربحت من آخر 12 إشارة
+📈 الإشارات الأخيرة نجحت بنسبة 100% وكسبت للأعضاء متوسط 3,200 جنيه
+
+⏰ الإشارة القادمة خلال 15 دقيقة
+❌ بدون تسجيل = بدون أرباح
+
+هل تريد الانضمام الآن؟"""
+
+FOMO_24HOURS_MSG = """📉 خسرت فعلياً:
+
+بالأمس أرسلنا 96 إشارة رابحة (كل 15 دقيقة):
+- متوسط الربح لكل إشارة: +2,500 جنيه
+- إجمالي الأرباح المحتملة في 24 ساعة: 240,000 جنيه
+- خسارتك الشخصية المحتملة: 12,000+ جنيه
+
+💔 كم يوم آخر ستخسر فيه هذه الفرص؟
+
+⚡ الفرصة الأخيرة - سجل الآن ولا تضيع يوم آخر!"""
+
+GUARANTEE_MSG = """🎁 عرض خاص لك!
+
+أعرف إنك خايف من المخاطرة، عادي جداً.
+
+لذلك أقدملك ضمان شخصي مني:
+
+✅ سجل وادفع الـ 195 جنيه
+✅ جرب أول 3 إشارات
+✅ لو ما كسبتش في واحدة منهم...
+💰 أنا شخصياً أرجعلك الـ 195 جنيه كاملة!
+
+ليه الضمان ده؟ 
+لأني واثق 100% من الإشارات 🎯
+
+⏰ العرض ده صالح لـ 24 ساعة فقط
+💬 رد بـ "موافق" عشان أبدأ معاك"""
+
+# ---------------- clients and state ----------------
+SESSION_USER = f"session_user_{PHONE.replace('+','').replace(' ','')}" if PHONE else "session_user"
+SESSION_BOT = "session_bot"
+user_client = TelegramClient(SESSION_USER, API_ID, API_HASH)
+bot_client = TelegramClient(SESSION_BOT, API_ID, API_HASH) if BOT_TOKEN else None
+bot_started = False
+message_host = None
+user_target_channel = None
+
+state = {
+    "users_welcomed": [], 
+    "users_sent": [], 
+    "users_final_replied": [], 
+    "users_join_time": {}, 
+    "users_registered": [],
+    "video_counter": 0,  # جديد
+    "last_used_patterns": []  # جديد
+}
+users_welcomed = set()
+users_sent = set()
+users_final_replied = set()
+users_join_time: Dict[int, float] = {}
+users_registered = set()
+_user_locks: Dict[int, asyncio.Lock] = {}
+_dialogs_cache = None
+_dialogs_cache_updated_at = 0
+_DIALOGS_CACHE_TTL = 3600
+_recently_processed_joins: Dict[int, float] = {}
+_JOIN_DEDUP_WINDOW = 60
+_join_handler_lock = asyncio.Lock()
+_is_processing_join_event = False
+_broadcast_mode: Dict[int, bool] = {}
+_follow_up_tasks: Dict[int, asyncio.Task] = {}
+
+# ============ دوال نظام الفيديوهات الجديدة ============
+
+def create_pattern_id(pattern: Dict[int, int]) -> str:
+    """إنشاء معرّف فريد للنمط"""
+    sorted_rows = sorted(pattern.keys(), reverse=True)
+    parts = [f"{row}:{pattern[row]}" for row in sorted_rows]
+    return "_".join(parts)
+
+def pattern_dict_to_id(pattern: Dict[int, int]) -> str:
+    """تحويل pattern dictionary إلى string ID"""
+    return create_pattern_id(pattern)
+
+def get_available_patterns_with_videos() -> List[Dict[int, int]]:
+    """الحصول على الأنماط اللي عندها فيديوهات موجودة فعلياً"""
+    available = []
+    for pattern in ALL_PATTERNS:
+        pattern_id = create_pattern_id(pattern)
+        if pattern_id in PATTERN_TO_VIDEO:
+            video_path = os.path.join(VIDEOS_DIR, PATTERN_TO_VIDEO[pattern_id])
+            if os.path.exists(video_path):
+                available.append(pattern)
+    return available
+
+def select_smart_pattern() -> Dict[int, int]:
+    """
+    اختيار نمط ذكي مع منع التكرار
+    - يختار من الأنماط اللي عندها فيديوهات
+    - يتجنب الأنماط المستخدمة مؤخراً
+    """
+    global last_used_patterns
+    
+    available = get_available_patterns_with_videos()
+    
+    if not available:
+        log.warning("⚠️ No patterns with videos found! Using random pattern")
+        return random.choice(ALL_PATTERNS)
+    
+    # تجنب آخر 5 أنماط مستخدمة
+    if last_used_patterns:
+        unused = [p for p in available if pattern_dict_to_id(p) not in last_used_patterns[-5:]]
+        if unused:
+            available = unused
+    
+    # اختيار نمط عشوائي
+    selected = random.choice(available)
+    pattern_id = pattern_dict_to_id(selected)
+    
+    # حفظ في التاريخ
+    last_used_patterns.append(pattern_id)
+    if len(last_used_patterns) > 10:
+        last_used_patterns.pop(0)
+    
+    return selected
+
+async def generate_apple_game_with_pattern(custom_pattern: Optional[Dict[int, int]] = None) -> Tuple[str, Dict]:
+    """
+    توليد إشارة تفاحة مع نمط محدد أو عشوائي ذكي
+    
+    Returns:
+        (game_text, apple_info)
+    """
+    global last_apple_info
+    
+    rows, columns = 10, 5
+    base_grid = [["🟫" for _ in range(columns)] for _ in range(rows)]
+    
+    # اختيار النمط
+    if custom_pattern:
+        selected_pattern = custom_pattern
+    else:
+        selected_pattern = select_smart_pattern()
+    
+    # وضع التفاح حسب النمط
+    for row, col in selected_pattern.items():
+        base_grid[row][col] = "🍎"
+    
+    # إنشاء معرّف النمط
+    pattern_id = create_pattern_id(selected_pattern)
+    
+    # حفظ معلومات الإشارة
+    last_apple_info = {
+        "pattern": selected_pattern,
+        "pattern_id": pattern_id,
+        "num_rows": len(selected_pattern),
+        "rows": sorted(selected_pattern.keys(), reverse=True),
+        "columns": [selected_pattern[r] for r in sorted(selected_pattern.keys(), reverse=True)]
+    }
+    
+    # توليد النص
+    grid_text = "\n".join("".join(row) for row in base_grid)
+    game_text = f"""✅ اشاره جديده ✅
+الاشاره لمده ٥ دقائق ⏰
+🍏 Apple oF Fortune 🍏
+
+{grid_text}
+
+‼️الاشاره تعمل فقط لمن استعمل الرمز الترويجي BB33 عن التسجيل بحساب جديد
+‼️اقل ايداع عشان الإشارات تشتغل معاك هو  195 جنيه و في حاله الايداع بمبلغ اقل من 195 هتخسر للاسف
+رابط التسجيل : 🔥🔥 {REGISTRATION_LINK}
+
+لو عندك مشكلة او استفسارات تواصل مع : {CONTACT_USERNAME}"""
+    
+    log.info(f"🍎 Generated pattern: {pattern_id}")
+    
+    return game_text, last_apple_info
+
+def get_video_for_pattern(apple_info: Dict) -> Optional[str]:
+    """
+    الحصول على مسار الفيديو المطابق للنمط
+    
+    Returns:
+        مسار الفيديو أو None
+    """
+    try:
+        pattern_id = apple_info["pattern_id"]
+        
+        if pattern_id not in PATTERN_TO_VIDEO:
+            log.warning(f"⚠️ No video mapping for pattern: {pattern_id}")
+            return None
+        
+        video_name = PATTERN_TO_VIDEO[pattern_id]
+        video_path = os.path.join(VIDEOS_DIR, video_name)
+        
+        if not os.path.exists(video_path):
+            log.error(f"❌ Video file not found: {video_path}")
+            return None
+        
+        log.info(f"✅ Found video for pattern {pattern_id}: {video_name}")
+        return video_path
+        
+    except Exception as e:
+        log.error(f"❌ Error getting video for pattern: {e}")
+        return None
+
+async def send_video_note(video_path: str, apple_info: Dict) -> bool:
+    """
+    إرسال فيديو دائري (Video Note) للقناة
+    
+    Args:
+        video_path: مسار الفيديو
+        apple_info: معلومات النمط
+    
+    Returns:
+        True إذا نجح الإرسال
+    """
+    try:
+        if not os.path.exists(video_path):
+            log.error(f"❌ Video file not found: {video_path}")
+            return False
+        
+        log.info(f"📹 Sending video note: {os.path.basename(video_path)}")
+        
+        # إرسال كـ Video Note (دائري)
+        await user_client.send_file(
+            user_target_channel,
+            video_path,
+            caption=VIDEO_CAPTION,
+            buttons=create_action_buttons(),
+            video_note=True,  # ← هذا يجعله دائري!
+            thumb=None
+        )
+        
+        log.info(f"✅ Video note sent successfully for pattern {apple_info['pattern_id']}")
+        return True
+        
+    except FloodWaitError as fe:
+        log.warning(f"⚠️ FloodWait sending video: wait {fe.seconds}s")
+        await asyncio.sleep(fe.seconds + 1)
+        return False
+    except Exception as e:
+        log.error(f"❌ Error sending video note: {e}")
+        return False
+
+# ---------------- persistence ----------------
+def load_state():
+    global state, users_welcomed, users_sent, users_final_replied, users_join_time, users_registered
+    global video_counter, last_used_patterns
+    try:
+        if os.path.isfile(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            users_welcomed = set(state.get("users_welcomed", []))
+            users_sent = set(state.get("users_sent", []))
+            users_final_replied = set(state.get("users_final_replied", []))
+            users_join_time = {int(k): float(v) for k, v in state.get("users_join_time", {}).items()}
+            users_registered = set(state.get("users_registered", []))
+            video_counter = state.get("video_counter", 0)  # جديد
+            last_used_patterns = state.get("last_used_patterns", [])  # جديد
+            log.info(f"Loaded state: welcomed={len(users_welcomed)}, video_counter={video_counter}")
+        else:
+            log.info("No state file found; starting fresh.")
+    except Exception as e:
+        log.error(f"Failed loading state: {e}")
+        state = {
+            "users_welcomed": [], 
+            "users_sent": [], 
+            "users_final_replied": [], 
+            "users_join_time": {}, 
+            "users_registered": [],
+            "video_counter": 0,
+            "last_used_patterns": []
+        }
+        users_welcomed = set()
+        users_sent = set()
+        users_final_replied = set()
+        users_join_time = {}
+        users_registered = set()
+        video_counter = 0
+        last_used_patterns = []
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "users_welcomed": list(users_welcomed), 
+                "users_sent": list(users_sent),
+                "users_final_replied": list(users_final_replied),
+                "users_join_time": {str(k): v for k, v in users_join_time.items()},
+                "users_registered": list(users_registered),
+                "video_counter": video_counter,  # جديد
+                "last_used_patterns": last_used_patterns  # جديد
+            }, f, ensure_ascii=False, indent=2)
+        log.debug("State saved.")
+    except Exception as e:
+        log.error(f"Failed saving state: {e}")
+
+# ---------------- helpers ----------------
+def get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _
